@@ -108,6 +108,9 @@ func (c *Client) Messages(mailbox string) iter.Seq2[*Message, error] {
 			// go-imapwire sometimes reports ENVELOPE parse errors here; ignore them.
 			if isMalformedEnvelopeErr(err) {
 				logger.Warn("releasing fetch command failed (malformed ENVELOPE; ignored)", "error", err)
+				if !canceled {
+					yield(nil, fmt.Errorf("releasing fetch command failed (malformed ENVELOPE): %w", err))
+				}
 				return
 			}
 
