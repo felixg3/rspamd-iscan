@@ -1,6 +1,8 @@
 package imapclt
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"testing"
@@ -45,4 +47,23 @@ func TestMessages(t *testing.T) {
 		cnt++
 	}
 	assert.Equal(t, 3, cnt)
+}
+
+func TestIsMalformedEnvelopeErr(t *testing.T) {
+	t.Run("wrapped sentinel", func(t *testing.T) {
+		err := fmt.Errorf("x: %w", errMalformedEnvelope)
+		if !isMalformedEnvelopeErr(err) {
+			t.Fatalf("expected malformed envelope error to be detected")
+		}
+		if !errors.Is(err, errMalformedEnvelope) {
+			t.Fatalf("expected errors.Is to match sentinel")
+		}
+	})
+
+	t.Run("imapwire expected paren", func(t *testing.T) {
+		err := errors.New(`in response-data: in envelope: imapwire: expected ')', got "7"`)
+		if !isMalformedEnvelopeErr(err) {
+			t.Fatalf("expected imapwire envelope parse error to be detected")
+		}
+	})
 }
