@@ -7,6 +7,7 @@ import (
 	"io"
 	"iter"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -26,6 +27,23 @@ type Envelope struct {
 	// Recipients are the To, Cc and Bcc addresses
 	Recipients []string
 	MessageID  string
+}
+
+var errMalformedEnvelope = errors.New("malformed IMAP ENVELOPE")
+
+func isMalformedEnvelopeErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errMalformedEnvelope) {
+		return true
+	}
+
+	// Known go-imapwire parse errors surface either during Collect() or Close():
+	// "in response-data: in envelope: imapwire: expected ')', got \"7\""
+	s := err.Error()
+	return strings.Contains(s, "in envelope") ||
+		strings.Contains(s, "imapwire: expected ')',")
 }
 
 // Messages returns an iterator over the messages in mailbox.
@@ -65,6 +83,12 @@ func (c *Client) Messages(mailbox string) iter.Seq2[*Message, error] {
 		for {
 			msg, err := c.fetchNext(fetchCmd)
 			if err != nil {
+				// Critical: malformed ENVELOPEs must not crash the service.
+				if isMalformedEnvelopeErr(err) {
+					logger.Warn("skipping message due to malformed ENVELOPE", "error", err)
+					continue
+				}
+
 				canceled = !yield(nil, err)
 				break
 			}
@@ -81,6 +105,15 @@ func (c *Client) Messages(mailbox string) iter.Seq2[*Message, error] {
 
 		err = fetchCmd.Close()
 		if err != nil {
+			// go-imapwire sometimes reports ENVELOPE parse errors here; ignore them.
+			if isMalformedEnvelopeErr(err) {
+				logger.Warn("releasing fetch command failed (malformed ENVELOPE; ignored)", "error", err)
+				if !canceled {
+					yield(nil, fmt.Errorf("releasing fetch command failed (malformed ENVELOPE): %w", err))
+				}
+				return
+			}
+
 			if !canceled {
 				yield(nil, fmt.Errorf("releasing fetch command failed: %w", err))
 				return
@@ -101,14 +134,16 @@ func (c *Client) fetchNext(fetchCmd *imapclient.FetchCommand) (*Message, error) 
 
 	msg, err := msgData.Collect()
 	if err != nil {
+		// May include ENVELOPE parse errors; caller decides whether to skip.
 		return nil, fmt.Errorf("collecting message failed: %w", err)
 	}
 
-	if msg.Envelope == nil {
-		return nil, fmt.Errorf("message envelope is nil")
-	}
 	if msg.UID == 0 {
 		return nil, fmt.Errorf("message uid is 0")
+	}
+	if msg.Envelope == nil {
+		// Return a sentinel so the caller can skip instead of terminating.
+		return nil, fmt.Errorf("%w: uid=%d", errMalformedEnvelope, msg.UID)
 	}
 
 	logger := c.logger.With(
